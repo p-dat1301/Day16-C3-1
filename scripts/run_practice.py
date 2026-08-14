@@ -368,7 +368,7 @@ def main(argv=None) -> int:
     parser.add_argument("--max-tokens", type=int, default=None,
                         help="ngân sách output mỗi lần gọi model")
     parser.add_argument("--prompt-addendum", action="store_true",
-                        help="thêm ràng buộc 'phải search trước khi abstain' vào system prompt")
+                        help="ép thêm ràng buộc search/fetch cho cả đường mock")
     parser.add_argument("--out", default=str(DEFAULT_OUT), help="file điểm JSON")
     parser.add_argument("--entry", default=None, help="tên đội / bài nộp")
     parser.add_argument("--tag", default="entry", choices=("entry", "baseline"),
@@ -397,7 +397,10 @@ def main(argv=None) -> int:
     del _probe  # a FRESH stack per brief; no state may leak between runs
     config = RunnerConfig(
         flaky=not args.no_flaky,
-        prompt_addendum=args.prompt_addendum,
+        # A real endpoint can otherwise submit a turn-one abstention with no
+        # observed evidence.  Keep mock unchanged for its fixed offline
+        # ladder, but make the real CLI path safe by default.
+        prompt_addendum=args.prompt_addendum or args.model == "real",
         **({"wall_clock_seconds": args.max_seconds} if args.max_seconds else {}),
         **({"max_tokens": args.max_tokens} if args.max_tokens else {}),
     )
