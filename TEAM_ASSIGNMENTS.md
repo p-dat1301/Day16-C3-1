@@ -251,7 +251,479 @@ retry
 - Có bằng chứng smoke run với model endpoint thật.
 - Không có thay đổi ngoài phạm vi đã thống nhất.
 
-## 8. Quy tắc phối hợp
+## 8. Quy trình làm việc chi tiết cho 5 role
+
+### 8.1. Quy trình chung của cả nhóm
+
+Mọi role dùng cùng một chu trình để tránh code chạy riêng nhưng hỏng khi tích hợp:
+
+1. Đọc contract và test liên quan trước khi sửa code.
+2. Ghi lại baseline của phạm vi mình phụ trách.
+3. Viết acceptance test thể hiện hành vi cần đạt.
+4. Chạy test để xác nhận test mới thất bại đúng nguyên nhân.
+5. Triển khai thay đổi nhỏ nhất trong file ownership.
+6. Chạy unit test của layer.
+7. Chạy integration test có layer liên quan.
+8. Chạy practice với layer riêng.
+9. Chạy practice cùng các layer phụ thuộc.
+10. Tự review diff trước khi bàn giao.
+11. Gửi Integration Lead bằng chứng test, lệnh chạy và rủi ro còn lại.
+12. Chỉ đánh dấu hoàn tất sau khi Integration Lead xác nhận full-stack không regression.
+
+Mẫu bàn giao bắt buộc cho mỗi role:
+
+```text
+Role:
+Files changed:
+Behavior implemented:
+Tests added/updated:
+Commands executed:
+Results:
+Known limitations:
+Integration risks:
+Reviewer:
+```
+
+Không dùng câu “test pass” chung chung. Phải ghi đúng lệnh và kết quả quan trọng.
+
+### 8.2. Quy trình Role 1 - Grounding & Critic Engineer
+
+#### Giai đoạn A - Hiểu contract
+
+1. Đọc `harness/layers/critic.py` và toàn bộ docstring.
+2. Đọc `AgentContext` trong `harness/agent.py` để hiểu:
+   - `ctx.observed_text` được tạo thế nào.
+   - Evidence nào model đã thực sự thấy.
+   - Report đi vào `after_agent` có cấu trúc gì.
+3. Đọc claim verdict trong `arena/scorer.py`.
+4. Đọc test critic, scorer, absent và contradiction hiện có.
+5. Chốt invariant với Role 2:
+   - Không paraphrase claim.
+   - Không thêm dấu câu.
+   - Không lấy evidence trực tiếp từ corpus nếu model chưa quan sát.
+
+#### Giai đoạn B - Khóa hành vi bằng test
+
+Viết test theo thứ tự:
+
+1. Claim nguyên văn có trong observed evidence được giữ.
+2. Fabricated claim bị xóa.
+3. Claim gần giống nhưng khác một ký tự bị loại.
+4. Claim ghép từ hai dòng không được coi là evidence nguyên văn.
+5. Report không còn claim thì `abstain = true`.
+6. Citations được rebuild từ claims còn lại.
+7. Input report không bị mutate ngoài phạm vi contract nếu test yêu cầu copy semantics.
+
+Chạy test hẹp:
+
+```bash
+python3 -m pytest -q tests/test_layers_stubs.py
+python3 -m pytest -q tests/test_scorer.py
+```
+
+#### Giai đoạn C - Triển khai
+
+1. Tạo bản sao report/claims khi cần tránh side effect ngoài ý muốn.
+2. Duyệt claims theo thứ tự model tạo.
+3. Kiểm tra claim text trong evidence đã quan sát.
+4. Giữ nguyên claim hợp lệ.
+5. Loại claim không có evidence.
+6. Rebuild citations.
+7. Đặt abstain khi không còn claim.
+8. Không thêm fallback claim hoặc text tự sinh.
+
+#### Giai đoạn D - Tự kiểm tra và bàn giao
+
+```bash
+python3 scripts/run_practice.py \
+  --layers critic \
+  --entry critic-only \
+  --out runs/critic-only.json
+
+python3 scripts/selfeval.py --run runs/critic-only.json
+```
+
+Role 1 phải báo:
+
+- Brief nào giảm fabricated claim.
+- Brief nào chuyển sang abstain.
+- Có claim hợp lệ nào bị xóa nhầm không.
+- Có mutation nào lên `claim["text"]` không.
+- Rủi ro cần Role 2 kiểm tra chéo.
+
+Role 2 review diff của Role 1 trước khi tích hợp.
+
+### 8.3. Quy trình Role 2 - Citation & Provenance Engineer
+
+#### Giai đoạn A - Hiểu contract
+
+1. Đọc `harness/layers/citation_checker.py`.
+2. Đọc cấu trúc `Doc` và corpus access trong `arena/corpus.py`.
+3. Đọc cách `observed_text` được cập nhật trong `harness/agent.py`.
+4. Đọc scorer để hiểu one-line exact match và provenance verdict.
+5. Chốt với Role 1 thứ tự xử lý claim/citation trong `after_agent`.
+
+#### Giai đoạn B - Khóa hành vi bằng test
+
+Viết test theo thứ tự:
+
+1. Claim đúng và `doc_id` đúng được giữ nguyên.
+2. Claim đúng nhưng `doc_id` sai được re-attribute.
+3. Claim thuộc document chưa fetch không được re-attribute.
+4. Claim nối qua hai dòng không được match.
+5. Claim nằm trong truncated observation không được coi là fully observed.
+6. Nhiều document chứa cùng text được xử lý deterministic.
+7. Citations được rebuild không trùng lặp.
+8. `claim["text"]` giữ nguyên byte-for-byte.
+
+Chạy test hẹp:
+
+```bash
+python3 -m pytest -q tests/test_layers_stubs.py
+python3 -m pytest -q tests/test_scorer.py
+python3 -m pytest -q tests/test_runner.py
+```
+
+#### Giai đoạn C - Triển khai
+
+1. Xác định document nào đã thực sự được quan sát đầy đủ.
+2. Tách `Doc.body` theo dòng đúng semantics của scorer.
+3. Với từng claim, kiểm tra document đang cite trước.
+4. Nếu cite sai, tìm document đã quan sát có dòng khớp nguyên văn.
+5. Chỉ thay `doc_id`.
+6. Không sửa, chuẩn hóa hoặc thêm dấu câu vào claim text.
+7. Rebuild citations theo thứ tự claims cuối.
+
+#### Giai đoạn D - Tự kiểm tra và bàn giao
+
+```bash
+python3 scripts/run_practice.py \
+  --layers citation_checker \
+  --entry citation-only \
+  --out runs/citation-only.json
+
+python3 scripts/run_practice.py \
+  --layers critic,citation_checker \
+  --entry grounding-stack \
+  --out runs/grounding-stack.json
+
+python3 scripts/selfeval.py --run runs/grounding-stack.json
+```
+
+Role 2 phải báo:
+
+- Số claim được re-attribute.
+- Claim nào vẫn không tìm được document hợp lệ.
+- Có document chưa fetch nào bị dùng nhầm không.
+- Có `NOT_FROM_MODEL` mới phát sinh không.
+- Interaction với Critic có thay đổi expected behavior không.
+
+Role 1 review diff của Role 2 trước khi tích hợp.
+
+### 8.4. Quy trình Role 3 - Reliability & Budget Engineer
+
+#### Giai đoạn A - Hiểu contract
+
+1. Đọc `harness/layers/retry.py` và `harness/layers/budget_policy.py`.
+2. Đọc `arena/tools.py` để hiểu:
+   - Khi nào `ok` là `false`.
+   - Truncate/noise có thể vẫn trả `ok = true`.
+   - `submit` được tính vào tool calls.
+3. Đọc wrap ordering trong `harness/middleware.py`.
+4. Đọc runner và brief budget trong `arena/runner.py`, `arena/briefs.py`.
+5. Chốt với Role 5 result nào do budget chủ động chặn và không được retry.
+
+#### Giai đoạn B - Khóa Retry bằng test
+
+Viết test:
+
+1. Success ngay lần đầu không retry.
+2. Error rồi success.
+3. Timeout rồi success.
+4. Truncate/noise với `ok = true` vẫn retry.
+5. Luôn degraded thì dừng tại max attempts.
+6. Tool name và args giữ nguyên qua attempts.
+7. Không retry khi chỉ còn submit reserve.
+8. Attempts được lưu trong `ctx.state`.
+
+#### Giai đoạn C - Khóa Budget bằng test
+
+Viết test:
+
+1. Dưới ngưỡng budget thì cho tool chạy.
+2. Chạm ngưỡng reserve thì chặn tool.
+3. `before_model` thêm nudge có `FINALIZE_SENTINEL`.
+4. Message input không bị mutate tại chỗ.
+5. Tool bị chặn trả `ToolResult` thay vì raise.
+6. Submit vẫn còn một slot.
+7. Retry không retry budget-blocked result.
+
+Chạy test hẹp:
+
+```bash
+python3 -m pytest -q tests/test_middleware.py
+python3 -m pytest -q tests/test_runner.py
+python3 -m pytest -q tests/test_layers_stubs.py
+```
+
+#### Giai đoạn D - Triển khai và đo flaky behavior
+
+1. Triển khai degraded-result detector trước.
+2. Thêm retry loop có giới hạn attempts.
+3. Kiểm tra budget trước mỗi attempt.
+4. Ghi attempt state.
+5. Triển khai budget threshold và submit reserve.
+6. Thêm finalize nudge bằng list message mới.
+7. Đánh dấu budget-blocked result đủ rõ để retry nhận biết.
+8. Chạy retry riêng, budget riêng, rồi kết hợp.
+
+```bash
+python3 scripts/run_practice.py \
+  --layers retry \
+  --entry retry-only \
+  --out runs/retry-only.json
+
+python3 scripts/run_practice.py \
+  --layers budget_policy \
+  --entry budget-only \
+  --out runs/budget-only.json
+
+python3 scripts/run_practice.py \
+  --layers budget_policy,retry \
+  --entry reliability-stack \
+  --out runs/reliability-stack.json
+```
+
+Role 3 phải báo:
+
+- Attempts theo từng degraded scenario.
+- Max tool calls quan sát được.
+- Run nào không còn slot submit.
+- Có budget-blocked result nào bị retry không.
+- Flaky variance cải thiện thế nào trên nhiều seed.
+
+Role 5 review interaction control flow trước khi nhận bàn giao.
+
+### 8.5. Quy trình Role 4 - Prompt Injection & Safety Engineer
+
+#### Giai đoạn A - Hiểu contract
+
+1. Đọc `harness/layers/injection_guard.py`.
+2. Đọc canary và hostile document format trong `arena/corpus.py`.
+3. Đọc tool result flow trong `arena/tools.py` và `harness/agent.py`.
+4. Đọc scorer safety để hiểu phạm vi quét canary.
+5. Chốt với Role 1 rằng Injection Guard không rewrite claim text.
+
+#### Giai đoạn B - Khóa hành vi bằng test
+
+Viết test:
+
+1. Không có marker thì giữ nguyên content.
+2. Một hostile block đầy đủ bị thay bằng placeholder.
+3. Nhiều hostile blocks đều bị loại.
+4. Marker mở thiếu marker đóng thì cắt đến cuối.
+5. Text bình thường trước và sau block được giữ.
+6. Canary trong answer bị loại.
+7. Claim text không bị sửa.
+8. Sanitized result vẫn giữ kiểu và metadata cần thiết.
+
+Chạy test hẹp:
+
+```bash
+python3 -m pytest -q tests/test_middleware.py
+python3 -m pytest -q tests/test_model.py
+python3 -m pytest -q tests/test_layers_stubs.py
+```
+
+#### Giai đoạn C - Triển khai
+
+1. Viết hàm xử lý block theo marker, không dựa vào tags.
+2. Lặp tới khi không còn hostile block.
+3. Xử lý missing end marker bằng cách cắt đến cuối content.
+4. Bọc tool call và sanitize result trước khi model thấy.
+5. Trong `after_agent`, chỉ làm sạch answer theo contract.
+6. Không sửa claims để tránh `NOT_FROM_MODEL`.
+
+#### Giai đoạn D - Tự kiểm tra và bàn giao
+
+```bash
+python3 scripts/run_practice.py \
+  --layers injection_guard \
+  --entry injection-only \
+  --out runs/injection-only.json
+
+python3 scripts/run_practice.py \
+  --layers injection_guard,critic,citation_checker \
+  --entry safety-grounding \
+  --out runs/safety-grounding.json
+
+python3 scripts/selfeval.py --run runs/safety-grounding.json
+```
+
+Role 4 phải báo:
+
+- Hostile block nào được loại.
+- Có evidence hợp lệ nào bị mất không.
+- Canary còn xuất hiện ở field nào không.
+- Có claim text nào bị thay đổi không.
+- Safety tăng có làm grounding giảm không.
+
+Role 5 review toàn bộ đường đi từ tool result đến submitted report.
+
+### 8.6. Quy trình Role 5 - Integration, Real-Model & QA Lead
+
+#### Giai đoạn A - Chuẩn bị baseline
+
+1. Đọc toàn bộ runtime flow và middleware contract.
+2. Chạy test và verify trước khi nhận code.
+3. Tạo baseline không layer.
+4. Ghi lại điểm, trace status, no-FINAL briefs và tool calls.
+5. Lập bảng theo dõi bàn giao của Role 1-4.
+
+```bash
+python3 -m pytest -q
+python3 scripts/verify.py
+python3 scripts/run_practice.py \
+  --layers none \
+  --entry baseline \
+  --out runs/baseline.json
+```
+
+#### Giai đoạn B - Nhận bàn giao từng role
+
+Với mỗi role:
+
+1. Đọc diff, không chỉ đọc mô tả.
+2. Xác nhận chỉ sửa file ownership và test đã thống nhất.
+3. Chạy lại đúng lệnh người bàn giao cung cấp.
+4. Kiểm tra test có thực sự khóa behavior, không chỉ test no-crash.
+5. Chạy layer riêng.
+6. Chạy cùng layer phụ thuộc.
+7. Nếu fail, gửi lại reproduction chính xác cho cùng owner sửa.
+8. Không tự sửa hộ logic layer trừ khi ownership được đổi rõ ràng.
+
+#### Giai đoạn C - Integration matrix
+
+Chạy tối thiểu:
+
+```bash
+python3 scripts/run_practice.py --layers critic
+python3 scripts/run_practice.py --layers citation_checker
+python3 scripts/run_practice.py --layers injection_guard
+python3 scripts/run_practice.py --layers retry
+python3 scripts/run_practice.py --layers budget_policy
+python3 scripts/run_practice.py --layers critic,citation_checker
+python3 scripts/run_practice.py --layers budget_policy,retry
+python3 scripts/run_practice.py --layers injection_guard,critic,citation_checker
+python3 scripts/run_practice.py
+python3 scripts/run_practice.py --no-flaky
+```
+
+Lệnh không truyền `--layers` là full stack mặc định. Không dùng `--layers all` nếu CLI không định nghĩa giá trị `all`.
+
+#### Giai đoạn D - Leave-one-out
+
+Chạy full stack thiếu từng layer:
+
+```bash
+python3 scripts/run_practice.py \
+  --layers injection_guard,critic,citation_checker,budget_policy
+
+python3 scripts/run_practice.py \
+  --layers injection_guard,critic,citation_checker,retry
+
+python3 scripts/run_practice.py \
+  --layers injection_guard,critic,budget_policy,retry
+
+python3 scripts/run_practice.py \
+  --layers injection_guard,citation_checker,budget_policy,retry
+
+python3 scripts/run_practice.py \
+  --layers critic,citation_checker,budget_policy,retry
+```
+
+Nếu bỏ một layer mà kết quả không đổi trên các scenario liên quan, yêu cầu owner chứng minh layer có tác dụng hoặc bổ sung test.
+
+#### Giai đoạn E - Full verification
+
+```bash
+python3 -m pytest -q
+python3 scripts/verify.py
+python3 scripts/verify.py --full
+python3 scripts/run_practice.py \
+  --entry full-stack \
+  --out runs/full-stack.json
+python3 scripts/selfeval.py --run runs/full-stack.json
+python3 scripts/leaderboard.py runs/baseline.json runs/full-stack.json
+```
+
+Role 5 kiểm tra:
+
+- Không no-FINAL ngoài fallback được thiết kế.
+- Trace gate pass.
+- Không fabricated claim.
+- Không wrong-document citation.
+- Không canary leak.
+- Tool calls nằm trong budget.
+- Full stack tốt hơn baseline.
+- Không regression khi tool không flaky.
+
+#### Giai đoạn F - Real-model smoke test
+
+Khi có credential thật:
+
+```bash
+export ARENA_API_KEY="..."
+export ARENA_BASE_URL="https://<host>/v1"
+export ARENA_MODEL="<model>"
+python3 scripts/run_practice.py \
+  --model real \
+  --strict \
+  --entry real-smoke \
+  --out runs/real-smoke.json
+```
+
+Không commit credential hoặc runtime output chứa dữ liệu nhạy cảm.
+
+Nếu thiếu endpoint hoặc credential, ghi rõ real-model path chưa được xác nhận. Không dùng fake transport hoặc MockModel để tuyên bố đã chạy thật.
+
+#### Giai đoạn G - Release gate
+
+Trước khi báo hoàn tất:
+
+```bash
+git status --short
+git diff --stat
+git diff --name-only
+```
+
+Xác nhận:
+
+- Không sửa `arena/`.
+- Không sửa `data/` để làm điểm đẹp.
+- Không commit `runs/`.
+- Không hard-code brief hoặc document ID.
+- Không dùng `Doc.tags`.
+- Không giảm `MAX_STEPS`.
+- Không thay frozen parser.
+- Không có middleware exception bị nuốt.
+- Mọi role đã có reviewer và bằng chứng test.
+
+Role 5 lập báo cáo sign-off cuối:
+
+```text
+Unit tests: PASS/FAIL
+Verify: PASS/FAIL
+Trace gate: PASS/FAIL
+Full-stack practice: PASS/FAIL
+Leave-one-out: PASS/FAIL
+Real-model smoke: PASS/FAIL/NOT RUN
+Frozen files unchanged: YES/NO
+Known limitations:
+Release decision: READY/NOT READY
+```
+
+## 9. Quy tắc phối hợp
 
 ### File ownership
 
@@ -282,7 +754,7 @@ retry
 - Thành viên 4 review toàn bộ đường đi của tool content đến report.
 - Thành viên 5 review integration, trace và phạm vi diff của tất cả thành viên.
 
-## 9. Thứ tự triển khai
+## 10. Thứ tự triển khai
 
 1. Cả nhóm đọc:
    - `README.md`
@@ -303,7 +775,7 @@ retry
 10. Chạy smoke test với model endpoint thật.
 11. Chỉ sign-off khi toàn bộ Definition of Done đạt.
 
-## 10. Quality gates
+## 11. Quality gates
 
 ### Test và verification
 
@@ -317,7 +789,7 @@ python3 scripts/verify.py --full
 
 ```bash
 python3 scripts/run_practice.py --layers none
-python3 scripts/run_practice.py --layers all
+python3 scripts/run_practice.py
 python3 scripts/run_practice.py --no-flaky
 python3 scripts/run_practice.py --strict
 ```
@@ -333,7 +805,7 @@ python3 scripts/run_practice.py --model real --strict
 
 MockModel chỉ dùng cho test deterministic và baseline. Mock score hoặc test xanh không đủ để sign-off real-model readiness.
 
-## 11. Definition of Done toàn dự án
+## 12. Definition of Done toàn dự án
 
 Dự án hoàn thành khi:
 
