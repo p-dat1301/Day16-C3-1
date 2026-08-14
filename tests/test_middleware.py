@@ -576,6 +576,23 @@ def test_a_final_written_under_an_action_still_ends_the_run():
     assert report["answer"].startswith("Cam kết")
 
 
+def test_real_prompt_policy_defers_final_until_a_document_is_fetched():
+    """A real model may ignore the prompt once; the agent must ask it to
+    retrieve instead of submitting an unsupported turn-one FINAL."""
+    fetch = 'ACTION: {"tool": "fetch_doc", "args": {"doc_id": "doc-0004"}}'
+    policy_prompt = ARENA_SYSTEM_PROMPT + "\nQUY TẮC BỔ SUNG (bắt buộc)"
+    agent, report, trace = _scripted_run(
+        GENUINE_FINAL, REAL_ACTION, fetch, GENUINE_FINAL,
+        system_prompt=policy_prompt,
+    )
+
+    assert report["answer"].startswith("Cam kết")
+    calls = [event["name"] for event in _events(trace.to_jsonl())
+             if event["event"] == "tool_call"]
+    assert calls == ["search", "fetch_doc", "submit"]
+    assert agent._retrieval_final_deferrals == 1
+
+
 def test_a_refused_final_is_submitted_if_the_run_never_writes_another():
     """Refusing a quoted template buys the model another turn. It must
     never COST the run its report: a model that quotes and never answers

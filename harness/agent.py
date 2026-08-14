@@ -153,6 +153,12 @@ REPORT_KEYS = ("answer", "claims", "abstain", "citations")
 #: finish. After this many deferrals the FINAL is taken at face value.
 MAX_FINAL_DEFERRALS = 2
 
+# The frozen runner appends this heading when its real-model prompt policy is
+# enabled.  In that path a turn-one FINAL is not useful evidence: it has not
+# seen a full document and the critic must (correctly) remove every claim.
+_RETRIEVAL_POLICY_MARKER = "QUY TẮC BỔ SUNG (bắt buộc)"
+MAX_RETRIEVAL_FINAL_DEFERRALS = 2
+
 #: What a model writes where CONTENT belongs when it is QUOTING the
 #: protocol instead of answering: the template's own `...`, an ellipsis,
 #: a dash, or an `<angle-bracket slot>`.
@@ -481,11 +487,16 @@ class ReActAgent:
         self.corpus = corpus if corpus is not None else getattr(tools, "_corpus", None)
         self.max_steps = max(1, int(max_steps))
         self.system_prompt = system_prompt
+        self._require_document_before_final = (
+            _RETRIEVAL_POLICY_MARKER in system_prompt
+        )
         self.last_context: AgentContext | None = None
         # Per-run bookkeeping for the two `_parse` guards. Reset in
         # `run()`; kept on the agent rather than in `ctx.state`, which
         # belongs to the layers.
         self._final_deferrals = 0
+        self._retrieval_final_deferrals = 0
+        self._retrieval_nudge_pending = False
         self._refused_final: dict | None = None
 
     # -- the run -------------------------------------------------------
@@ -502,6 +513,8 @@ class ReActAgent:
         )
         self.last_context = ctx
         self._final_deferrals = 0
+        self._retrieval_final_deferrals = 0
+        self._retrieval_nudge_pending = False
         self._refused_final = None
 
         self.trace.emit("agent_start", brief_id=str(brief.get("brief_id", "")))
@@ -595,6 +608,22 @@ class ReActAgent:
         if parsed.kind != "final":
             return parsed
 
+        ctx = self.last_context
+        fetched_document = bool(ctx and ctx.state.get("_agent_fetched_document"))
+        if (
+            self._require_document_before_final
+            and not fetched_document
+            and self._retrieval_final_deferrals < MAX_RETRIEVAL_FINAL_DEFERRALS
+        ):
+            # Keep the model-written FINAL as a last-resort fallback, then
+            # give the model a genuine next turn to request search/fetch.
+            # We never fabricate an ACTION on its behalf.
+            self._retrieval_final_deferrals += 1
+            self._retrieval_nudge_pending = True
+            if isinstance(parsed.final, dict):
+                self._refused_final = parsed.final
+            return parse_output("")
+
         if _is_report_payload(parsed.final):
             action = _action_under_final(text)
             if action is None or self._final_deferrals >= MAX_FINAL_DEFERRALS:
@@ -647,6 +676,13 @@ class ReActAgent:
         """Run one tool call through the `wrap_tool_call` chain and turn
         the result into the observation string the model is shown."""
         if parsed.kind != "action" or not parsed.tool:
+            if self._retrieval_nudge_pending:
+                self._retrieval_nudge_pending = False
+                return (
+                    f"{TOOL_ERROR_PREFIX} FINAL bị hoãn: chưa đọc toàn văn tài liệu nào. "
+                    "Lượt kế tiếp bắt buộc trả ACTION search; sau đó ACTION fetch_doc cho một "
+                    "doc_id tìm được, rồi mới được FINAL."
+                )
             # Not a THOUGHT/ACTION turn and not a FINAL either. Say so
             # rather than guessing — a real model that drifts off the
             # protocol needs to be told, and the mock never gets here.
@@ -659,6 +695,8 @@ class ReActAgent:
         result = call(parsed.tool, dict(parsed.args))
         if result is None or not hasattr(result, "ok"):
             return f"{TOOL_ERROR_PREFIX} layer trả về kết quả không hợp lệ cho {parsed.tool}"
+        if parsed.tool == "fetch_doc" and result.ok:
+            ctx.state["_agent_fetched_document"] = True
         return result.content if result.ok else f"{TOOL_ERROR_PREFIX} {result.error}"
 
     def _dispatch(self, name: str, args: dict) -> ToolResult:
