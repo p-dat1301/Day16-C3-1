@@ -87,7 +87,9 @@ def check_frozen():
         if not path.exists():
             bad.append(f"{relative}: thiếu file")
             continue
-        digest = hashlib.md5(path.read_bytes()).hexdigest()
+        # Preserve the frozen content check across Windows CRLF checkout
+        # conversion; the committed instructor files are LF-normalised.
+        digest = hashlib.md5(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
         if digest != expected:
             bad.append(f"{relative}: {digest} != {expected}")
     if bad:

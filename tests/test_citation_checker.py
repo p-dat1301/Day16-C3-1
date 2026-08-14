@@ -457,13 +457,17 @@ def test_every_claim_the_layer_cites_was_actually_fetched():
 
 
 def test_the_layer_works_the_same_inside_the_full_stack():
-    """Bốn lớp kia còn là no-op, nên đây là bài kiểm tra tích hợp sớm: cài cả
-    năm lớp phải cho đúng report mà cài một mình lớp này cho."""
+    """Full stack có thể bỏ claim hoặc retry tool, nhưng không được làm hỏng
+    provenance mà citation checker bảo vệ."""
     for brief in TRAP_BRIEFS:
-        alone, _ = run(brief, SEEDS[0], [CitationChecker()])
         stacked, jsonl = run(brief, SEEDS[0], student_stack())
-        assert stacked.get("claims") == alone.get("claims"), brief["brief_id"]
-        assert stacked.get("citations") == alone.get("citations"), brief["brief_id"]
-        assert score_run(
-            brief, stacked, trace_jsonl=jsonl, corpus=CORPUS
-        ).gate_passed, brief["brief_id"]
+        score = score_run(brief, stacked, trace_jsonl=jsonl, corpus=CORPUS)
+        expected_citations = sorted({
+            claim.get("doc_id")
+            for claim in stacked.get("claims") or []
+            if isinstance(claim, dict) and claim.get("doc_id")
+        })
+
+        assert score.gate_passed, brief["brief_id"]
+        assert score.detail["grounding"]["verdict_counts"].get("MISATTRIBUTED", 0) == 0
+        assert stacked.get("citations") == expected_citations, brief["brief_id"]

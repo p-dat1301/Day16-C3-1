@@ -91,6 +91,37 @@ STACK_ORDER = (
 )
 
 
+def load_local_env() -> None:
+    """Load local OpenAI-compatible settings without overriding shell env.
+
+    `.env` is deliberately ignored by Git.  Supporting both the runner's
+    `ARENA_*` names and the conventional `OPENAI_*` names lets a local
+    endpoint be configured without exposing a key in a command history.
+    """
+    if os.environ.get("ARENA_SKIP_DOTENV") == "1":
+        return
+    path = LAB_ROOT / ".env"
+    if not path.is_file():
+        return
+    aliases = {
+        "OPENAI_API_KEY": "ARENA_API_KEY",
+        "OPENAI_MODEL": "ARENA_MODEL",
+        "OPENAI_BASE_URL": "ARENA_BASE_URL",
+        "ARENA_API_KEY": "ARENA_API_KEY",
+        "ARENA_MODEL": "ARENA_MODEL",
+        "ARENA_BASE_URL": "ARENA_BASE_URL",
+    }
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        target = aliases.get(key.strip())
+        value = value.strip().strip('"').strip("'")
+        if target and value and not os.environ.get(target):
+            os.environ[target] = value
+
+
 def _student_layers(names):
     from harness.layers.budget_policy import BudgetPolicy
     from harness.layers.citation_checker import CitationChecker
@@ -128,6 +159,7 @@ def build_middleware(spec: str):
 def build_model(kind: str, corpus: Corpus, seed: int, timeout: float):
     if kind == "mock":
         return MockModel(corpus=corpus, seed=seed)
+    load_local_env()
     try:
         return RealModel.from_env(timeout=timeout)
     except RealModelError as exc:

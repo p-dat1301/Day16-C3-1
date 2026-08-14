@@ -878,7 +878,10 @@ def test_the_frozen_modules_are_untouched():
         "arena/model.py": "7e71ed083122dc4f68373a1df7ed4f75",
     }
     for path, digest in expected.items():
-        data = (REPO_ROOT / path).read_bytes()
+        # Git may materialise the frozen files as CRLF on Windows although the
+        # committed source bytes are LF.  The guard protects code content, not
+        # the checkout's platform-specific line-ending conversion.
+        data = (REPO_ROOT / path).read_bytes().replace(b"\r\n", b"\n")
         assert hashlib.md5(data).hexdigest() == digest, path
 
 
