@@ -4,7 +4,7 @@
     python3 scripts/run_practice.py                  # mock, 8 brief công khai
     python3 scripts/run_practice.py --brief pub-01-sla-hien-hanh
     python3 scripts/run_practice.py --layers none    # baseline, không lớp nào
-    python3 scripts/run_practice.py --model real     # cần ARENA_* trong env
+    python3 scripts/run_practice.py --model real     # cần ARENA_* hoặc OPENROUTER_API_KEY
 
 Kết quả in ra màn hình VÀ ghi vào một file điểm JSON (mặc định
 `runs/practice.json`) — file đó là thứ `scripts/leaderboard.py` đọc.
@@ -94,9 +94,9 @@ STACK_ORDER = (
 def load_local_env() -> None:
     """Load local OpenAI-compatible settings without overriding shell env.
 
-    `.env` is deliberately ignored by Git.  Supporting both the runner's
-    `ARENA_*` names and the conventional `OPENAI_*` names lets a local
-    endpoint be configured without exposing a key in a command history.
+    `.env` is deliberately ignored by Git.  Supporting the runner's
+    `ARENA_*` names, OpenAI-compatible `OPENAI_*` names, and OpenRouter's
+    `OPENROUTER_API_KEY` avoids exposing a key in command history.
     """
     if os.environ.get("ARENA_SKIP_DOTENV") == "1":
         return
@@ -107,10 +107,23 @@ def load_local_env() -> None:
         "OPENAI_API_KEY": "ARENA_API_KEY",
         "OPENAI_MODEL": "ARENA_MODEL",
         "OPENAI_BASE_URL": "ARENA_BASE_URL",
+        "OPENROUTER_API_KEY": "ARENA_API_KEY",
+        "OPENROUTER_MODEL": "ARENA_MODEL",
+        "OPENROUTER_BASE_URL": "ARENA_BASE_URL",
         "ARENA_API_KEY": "ARENA_API_KEY",
         "ARENA_MODEL": "ARENA_MODEL",
         "ARENA_BASE_URL": "ARENA_BASE_URL",
     }
+    arena_from_shell = {
+        name: os.environ.get(name)
+        for name in ("ARENA_API_KEY", "ARENA_MODEL", "ARENA_BASE_URL")
+    }
+    router_values = {
+        "OPENROUTER_API_KEY": os.environ.get("OPENROUTER_API_KEY"),
+        "OPENROUTER_MODEL": os.environ.get("OPENROUTER_MODEL"),
+        "OPENROUTER_BASE_URL": os.environ.get("OPENROUTER_BASE_URL"),
+    }
+    use_openrouter = bool(router_values["OPENROUTER_API_KEY"])
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -120,6 +133,20 @@ def load_local_env() -> None:
         value = value.strip().strip('"').strip("'")
         if target and value and not os.environ.get(target):
             os.environ[target] = value
+        if key.strip() in router_values and value:
+            router_values[key.strip()] = value
+            use_openrouter = bool(router_values["OPENROUTER_API_KEY"])
+    if use_openrouter:
+        router_settings = {
+            "ARENA_API_KEY": router_values["OPENROUTER_API_KEY"],
+            "ARENA_MODEL": router_values["OPENROUTER_MODEL"] or "openai/gpt-5.6-luna",
+            "ARENA_BASE_URL": (
+                router_values["OPENROUTER_BASE_URL"] or "https://openrouter.ai/api/v1"
+            ),
+        }
+        for target, value in router_settings.items():
+            if value and not arena_from_shell[target]:
+                os.environ[target] = value
 
 
 def _student_layers(names):

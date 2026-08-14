@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -32,6 +33,8 @@ from functools import lru_cache
 from pathlib import Path
 
 import pytest
+
+from scripts import run_practice
 
 from arena.briefs import load_public_briefs
 from arena.corpus import Corpus
@@ -1334,6 +1337,25 @@ def test_run_practice_refuses_the_real_path_without_credentials():
     combined = proc.stdout + proc.stderr
     assert "ARENA_API_KEY" in combined
     assert "ARENA_BASE_URL" in combined
+
+
+def test_run_practice_loads_openrouter_luna_from_a_local_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_practice, "LAB_ROOT", tmp_path)
+    for name in (
+        "ARENA_API_KEY", "ARENA_MODEL", "ARENA_BASE_URL",
+        "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "OPENROUTER_BASE_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / ".env").write_text(
+        "OPENAI_MODEL=gpt-5.6-sol\nOPENROUTER_API_KEY=test-router-key\n",
+        encoding="utf-8",
+    )
+
+    run_practice.load_local_env()
+
+    assert os.environ["ARENA_API_KEY"] == "test-router-key"
+    assert os.environ["ARENA_MODEL"] == "openai/gpt-5.6-luna"
+    assert os.environ["ARENA_BASE_URL"] == "https://openrouter.ai/api/v1"
 
 
 def test_verify_exits_zero_on_a_clean_checkout():
